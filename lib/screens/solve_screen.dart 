@@ -1,0 +1,192 @@
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:speech_to_text/speech_to_text.dart';
+import '../services/chat_service.dart';
+import '../services/guest_manager.dart';
+
+class SolveScreen extends StatefulWidget {
+  const SolveScreen({super.key});
+
+  @override
+  State<SolveScreen> createState() => _SolveScreenState();
+}
+
+class _SolveScreenState extends State<SolveScreen> {
+  File? _image;
+  String _extractedText = '';
+  String _aiResponse = '';
+  bool _isLoading = false;
+  final _questionController = TextEditingController();
+  final SpeechToText _speechToText = SpeechToText();
+  bool _speechEnabled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initSpeech();
+  }
+
+  void _initSpeech() async {
+    _speechEnabled = await _speechToText.initialize();
+    setState(() {});
+  }
+
+  Future<void> _pickImage() async {
+    final pickedFile = await ImagePicker().pickImage(source: ImageSource.camera);
+    if (pickedFile != null) {
+      setState(() {
+        _image = File(pickedFile.path);
+        _extractedText = '';
+        _aiResponse = '';
+      });
+      await _extractTextFromImage();
+    }
+  }
+
+  Future<void> _extractTextFromImage() async {
+    if (_image == null) return;
+    setState(() => _isLoading = true);
+    
+    final inputImage = InputImage.fromFile(_image!);
+    final textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
+    final RecognizedText recognizedText = await textRecognizer.processImage(inputImage);
+    
+    setState(() {
+      _extractedText = recognizedText.text;
+      _questionController.text = recognizedText.text;
+      _isLoading = false;
+    });
+    await textRecognizer.close();
+  }
+
+  Future<void> _solveDoubt() async {
+    if (_questionController.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Enter a question first')),
+      );
+      return;
+    }
+    
+    if (await GuestManager.isGuest() && await GuestManager.hasReachedLimit()) {
+      _showUpgradeDialog();
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    final response = await ChatService.solveDoubt(_questionController.text);
+    setState(() {
+      _aiResponse = response;
+      _isLoading = false;
+    });
+    
+    if (await GuestManager.isGuest()) {
+      await GuestManager.incrementQuestionCount();
+    }
+  }
+
+  void _startListening() async {
+    if (!_speechEnabled) return;
+    await _speechToText.listen(
+      onResult: (result) {
+        setState(() {
+          _questionController.text = result.recognizedWords;
+        });
+      },
+    );
+  }
+
+  void _stopListening() async {
+    await _speechToText.stop();
+  }
+
+  void _showUpgradeDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Daily Limit Reached'),
+        content: const Text('You have used 3 free questions today. Login to continue unlimited.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              // Force logout guest to show auth screen
+            },
+            child: const Text('Login'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Solve Doubt')),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            if (_image != null) Image.file(_image!, height: 200),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _pickImage,
+                    icon: const Icon(Icons.camera_alt),
+                    label: const Text('Scan Question'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton(
+                  onPressed: _speechToText.isListening ? _stopListening : _startListening,
+                  icon: Icon(_speechToText.isListening ? Icons.mic_off : Icons.mic),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _questionController,
+              maxLines: 4,
+              decoration: const InputDecoration(
+                labelText: 'Type or edit your question',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            if (_isLoading)
+              const CircularProgressIndicator()
+            else
+              ElevatedButton(
+                onPressed: _solveDoubt,
+                style: ElevatedButton.styleFrom(
+                  minimumSize: const Size(double.infinity, 50),
+                ),
+                child: const Text('Solve Now'),
+              ),
+            const SizedBox(height: 24),
+            if (_aiResponse.isNotEmpty) ...[
+              const Text('Solution:', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: MarkdownBody(data: _aiResponse),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
